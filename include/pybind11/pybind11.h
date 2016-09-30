@@ -598,7 +598,9 @@ protected:
         type->ht_type.tp_weaklistoffset = offsetof(instance_essentials<void>, weakrefs);
 
         /* Flags */
-        type->ht_type.tp_flags |= Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HEAPTYPE;
+        type->ht_type.tp_flags |= Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HEAPTYPE;
+        if (rec->subclassing)
+            type->ht_type.tp_flags |= Py_TPFLAGS_BASETYPE;
 #if PY_MAJOR_VERSION < 3
         type->ht_type.tp_flags |= Py_TPFLAGS_CHECKTYPES;
 #endif
