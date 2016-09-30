@@ -173,6 +173,9 @@ struct type_record {
     /// Optional docstring
     const char *doc = nullptr;
 
+    /// Flag indicating whether or not the type supports subclassing
+    bool subclassing = false;
+
     /// Multiple inheritance marker
     bool multiple_inheritance : 1;
 
@@ -223,6 +226,11 @@ template <typename T> struct process_attribute_default {
 /// Process an attribute specifying the function's name
 template <> struct process_attribute<name> : process_attribute_default<name> {
     static void init(const name &n, function_record *r) { r->name = const_cast<char *>(n.value); }
+};
+
+/// Process a subclass flag attribute
+template <> struct process_attribute<bool> : process_attribute_default<bool> {
+    static void init(bool b, type_record *r) { r->subclassing = b; }
 };
 
 /// Process an attribute specifying the function's docstring
