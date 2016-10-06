@@ -56,6 +56,9 @@ struct metaclass { };
 /// Annotation to mark enums as an arithmetic type
 struct arithmetic { };
 
+/// Custom call policy type
+template <typename Policy> struct custom_call_policy { };
+
 NAMESPACE_BEGIN(detail)
 /* Forward declarations */
 enum op_id : int;
@@ -360,6 +363,15 @@ template <int Nurse, int Patient> struct process_attribute<keep_alive<Nurse, Pat
     static void precall(handle) { }
     template <int N = Nurse, int P = Patient, enable_if_t<N == 0 || P == 0, int> = 0>
     static void postcall(handle args, handle ret) { keep_alive_impl(Nurse, Patient, args, ret); }
+};
+
+/***
+ * Process a custom_call_policy
+ */
+template <typename Policy> struct process_attribute<custom_call_policy<Policy>> :
+public process_attribute_default<custom_call_policy<Policy>> {
+    static void precall(handle args) { Policy::precall(args); }
+    static void postcall(handle args, handle ret) { Policy::postcall(args, ret); }
 };
 
 /// Recursively iterate over variadic template arguments
