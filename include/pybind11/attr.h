@@ -64,6 +64,9 @@ template <typename T> struct base { };
 /// Keep patient alive while nurse lives
 template <int Nurse, int Patient> struct keep_alive { };
 
+/// Custom call policy type
+template <typename Policy> struct custom_call_policy { };
+
 NAMESPACE_BEGIN(detail)
 /* Forward declarations */
 enum op_id : int;
@@ -303,6 +306,15 @@ template <int Nurse, int Patient> struct process_attribute<keep_alive<Nurse, Pat
     static void precall(handle) { }
     template <int N = Nurse, int P = Patient, typename std::enable_if<N == 0 || P == 0, int>::type = 0>
     static void postcall(handle args, handle ret) { keep_alive_impl(Nurse, Patient, args, ret); }
+};
+
+/***
+ * Process a custom_call_policy
+ */
+template <typename Policy> struct process_attribute<custom_call_policy<Policy>> :
+public process_attribute_default<custom_call_policy<Policy>> {
+    static void precall(handle args) { Policy::precall(args); }
+    static void postcall(handle args, handle ret) { Policy::postcall(args, ret); }
 };
 
 /// Ignore that a variable is unused in compiler warnings
