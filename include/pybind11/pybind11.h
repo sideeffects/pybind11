@@ -38,7 +38,136 @@
 
 NAMESPACE_BEGIN(pybind11)
 
+#if defined(WITH_THREAD)
+
+/* The functions below essentially reproduce the PyGILState_* API using a RAII
+ * pattern, but there are a few important differences:
+ *
+ * 1. When acquiring the GIL from an non-main thread during the finalization
+ *    phase, the GILState API blindly terminates the calling thread, which
+ *    is often not what is wanted. This API does not do this.
+ *
+ * 2. The gil_scoped_release function can optionally cut the relationship
+ *    of a PyThreadState and its associated thread, which allows moving it to
+ *    another thread (this is a fairly rare/advanced use case).
+ *
+ * 3. The reference count of an acquired thread state can be controlled. This
+ *    can be handy to prevent cases where callbacks issued from an external
+ *    thread would otherwise constantly construct and destroy thread state data
+ *    structures.
+ *
+ * See the Python bindings of NanoGUI (http://github.com/wjakob/nanogui) for an
+ * example which uses features 2 and 3 to migrate the Python thread of
+ * execution to another thread (to run the event loop on the original thread,
+ * in this case).
+ */
+
+class gil_scoped_acquire {
+public:
+    PYBIND11_NOINLINE gil_scoped_acquire() {
+        auto const &internals = detail::get_internals();
+        tstate = (PyThreadState *) PyThread_get_key_value(internals.tstate);
+
+        if (!tstate) {
+            tstate = PyThreadState_New(internals.istate);
+            #if !defined(NDEBUG)
+                if (!tstate)
+                    pybind11_fail("scoped_acquire: could not create thread state!");
+            #endif
+            tstate->gilstate_counter = 0;
+            #if PY_MAJOR_VERSION < 3
+                PyThread_delete_key_value(internals.tstate);
+            #endif
+            PyThread_set_key_value(internals.tstate, tstate);
+        } else {
+            release = detail::get_thread_state_unchecked() != tstate;
+        }
+
+        if (release) {
+            /* Work around an annoying assertion in PyThreadState_Swap */
+            #if defined(Py_DEBUG)
+                PyInterpreterState *interp = tstate->interp;
+                tstate->interp = nullptr;
+            #endif
+            PyEval_AcquireThread(tstate);
+            #if defined(Py_DEBUG)
+                tstate->interp = interp;
+            #endif
+        }
+
+        inc_ref();
+    }
+
+    void inc_ref() {
+        ++tstate->gilstate_counter;
+    }
+
+    PYBIND11_NOINLINE void dec_ref() {
+        --tstate->gilstate_counter;
+        #if !defined(NDEBUG)
+            if (detail::get_thread_state_unchecked() != tstate)
+                pybind11_fail("scoped_acquire::dec_ref(): thread state must be current!");
+            if (tstate->gilstate_counter < 0)
+                pybind11_fail("scoped_acquire::dec_ref(): reference count underflow!");
+        #endif
+        if (tstate->gilstate_counter == 0) {
+            #if !defined(NDEBUG)
+                if (!release)
+                    pybind11_fail("scoped_acquire::dec_ref(): internal error!");
+            #endif
+            PyThreadState_Clear(tstate);
+            PyThreadState_DeleteCurrent();
+            PyThread_delete_key_value(detail::get_internals().tstate);
+            release = false;
+        }
+    }
+
+    PYBIND11_NOINLINE ~gil_scoped_acquire() {
+        dec_ref();
+        if (release)
+           PyEval_SaveThread();
+    }
+private:
+    PyThreadState *tstate = nullptr;
+    bool release = true;
+};
+
+class gil_scoped_release {
+public:
+    gil_scoped_release(bool disassoc = false) : disassoc(disassoc) {
+        tstate = PyEval_SaveThread();
+        if (disassoc) {
+            auto key = detail::get_internals().tstate;
+            #if PY_MAJOR_VERSION < 3
+                PyThread_delete_key_value(key);
+            #else
+                PyThread_set_key_value(key, nullptr);
+            #endif
+        }
+    }
+    ~gil_scoped_release() {
+        if (!tstate)
+            return;
+        PyEval_RestoreThread(tstate);
+        if (disassoc) {
+            auto key = detail::get_internals().tstate;
+            #if PY_MAJOR_VERSION < 3
+                PyThread_delete_key_value(key);
+            #endif
+            PyThread_set_key_value(key, tstate);
+        }
+    }
+private:
+    PyThreadState *tstate;
+    bool disassoc;
+};
+#else
+class gil_scoped_acquire { };
+class gil_scoped_release { };
+#endif
+
 /// Wraps an arbitrary C++ function/method/lambda function/.. into a callable Python object
+template <typename Scope=int>
 class cpp_function : public function {
 public:
     cpp_function() { }
@@ -137,7 +266,7 @@ protected:
             const auto policy = is_rvalue ? return_value_policy::move : rec->policy;
 
             /* Perform the function call */
-            handle result = cast_out::cast(args_converter.template call<Return>(cap->f),
+            handle result = cast_out::cast(args_converter.template call<Return, Scope>(cap->f),
                                            policy, parent);
 
             /* Invoke call policy post-call hook */
@@ -562,9 +691,9 @@ public:
         inc_ref();
     }
 
-    template <typename Func, typename... Extra>
+    template <typename Scope=int, typename Func, typename... Extra>
     module &def(const char *name_, Func &&f, const Extra& ... extra) {
-        cpp_function func(std::forward<Func>(f), name(name_), scope(*this),
+        cpp_function<Scope> func(std::forward<Func>(f), name(name_), scope(*this),
                           sibling(getattr(*this, name_, none())), extra...);
         // NB: allow overwriting here because cpp_function sets up a chain with the intention of
         // overwriting (and has already checked internally that it isn't overwriting non-functions).
@@ -1034,17 +1163,22 @@ public:
     template <typename Base, detail::enable_if_t<!is_base<Base>::value, int> = 0>
     static void add_base(detail::type_record &) { }
 
-    template <typename Func, typename... Extra>
+    template <typename Scope=int, typename Func, typename... Extra>
     class_ &def(const char *name_, Func&& f, const Extra&... extra) {
-        cpp_function cf(std::forward<Func>(f), name(name_), is_method(*this),
+        cpp_function<Scope> cf(std::forward<Func>(f), name(name_), is_method(*this),
                         sibling(getattr(*this, name_, none())), extra...);
         attr(cf.name()) = cf;
         return *this;
     }
 
-    template <typename Func, typename... Extra> class_ &
+    template <typename Func, typename... Extra>
+    class_ &def_release(const char *name_, Func&& f, const Extra&... extra) {
+	return def<gil_scoped_release>(name_, f, extra...);
+    }
+
+    template <typename Scope=int, typename Func, typename... Extra> class_ &
     def_static(const char *name_, Func f, const Extra&... extra) {
-        cpp_function cf(std::forward<Func>(f), name(name_), scope(*this),
+        cpp_function<Scope> cf(std::forward<Func>(f), name(name_), scope(*this),
                         sibling(getattr(*this, name_, none())), extra...);
         attr(cf.name()) = cf;
         return *this;
@@ -1088,7 +1222,7 @@ public:
 
     template <typename C, typename D, typename... Extra>
     class_ &def_readwrite(const char *name, D C::*pm, const Extra&... extra) {
-        cpp_function fget([pm](const C &c) -> const D &{ return c.*pm; }, is_method(*this)),
+        cpp_function<> fget([pm](const C &c) -> const D &{ return c.*pm; }, is_method(*this)),
                      fset([pm](C &c, const D &value) { c.*pm = value; }, is_method(*this));
         def_property(name, fget, fset, return_value_policy::reference_internal, extra...);
         return *this;
@@ -1096,14 +1230,14 @@ public:
 
     template <typename C, typename D, typename... Extra>
     class_ &def_readonly(const char *name, const D C::*pm, const Extra& ...extra) {
-        cpp_function fget([pm](const C &c) -> const D &{ return c.*pm; }, is_method(*this));
+        cpp_function<> fget([pm](const C &c) -> const D &{ return c.*pm; }, is_method(*this));
         def_property_readonly(name, fget, return_value_policy::reference_internal, extra...);
         return *this;
     }
 
     template <typename D, typename... Extra>
     class_ &def_readwrite_static(const char *name, D *pm, const Extra& ...extra) {
-        cpp_function fget([pm](object) -> const D &{ return *pm; }, scope(*this)),
+        cpp_function<> fget([pm](object) -> const D &{ return *pm; }, scope(*this)),
                      fset([pm](object, const D &value) { *pm = value; }, scope(*this));
         def_property_static(name, fget, fset, return_value_policy::reference, extra...);
         return *this;
@@ -1111,7 +1245,7 @@ public:
 
     template <typename D, typename... Extra>
     class_ &def_readonly_static(const char *name, const D *pm, const Extra& ...extra) {
-        cpp_function fget([pm](object) -> const D &{ return *pm; }, scope(*this));
+        cpp_function<> fget([pm](object) -> const D &{ return *pm; }, scope(*this));
         def_property_readonly_static(name, fget, return_value_policy::reference, extra...);
         return *this;
     }
@@ -1119,48 +1253,52 @@ public:
     /// Uses return_value_policy::reference_internal by default
     template <typename Getter, typename... Extra>
     class_ &def_property_readonly(const char *name, const Getter &fget, const Extra& ...extra) {
-        return def_property_readonly(name, cpp_function(fget), return_value_policy::reference_internal, extra...);
+        return def_property_readonly(name, cpp_function<>(fget), return_value_policy::reference_internal, extra...);
     }
 
     /// Uses cpp_function's return_value_policy by default
     template <typename... Extra>
-    class_ &def_property_readonly(const char *name, const cpp_function &fget, const Extra& ...extra) {
-        return def_property(name, fget, cpp_function(), extra...);
+    class_ &def_property_readonly(const char *name, const cpp_function<> &fget, const Extra& ...extra) {
+        return def_property(name, fget, cpp_function<>(), extra...);
     }
 
     /// Uses return_value_policy::reference by default
     template <typename Getter, typename... Extra>
     class_ &def_property_readonly_static(const char *name, const Getter &fget, const Extra& ...extra) {
-        return def_property_readonly_static(name, cpp_function(fget), return_value_policy::reference, extra...);
+        return def_property_readonly_static(name, cpp_function<>(fget), return_value_policy::reference, extra...);
     }
 
     /// Uses cpp_function's return_value_policy by default
     template <typename... Extra>
-    class_ &def_property_readonly_static(const char *name, const cpp_function &fget, const Extra& ...extra) {
-        return def_property_static(name, fget, cpp_function(), extra...);
+    class_ &def_property_readonly_static(const char *name, const cpp_function<> &fget, const Extra& ...extra) {
+        return def_property_static(name, fget, cpp_function<>(), extra...);
     }
 
     /// Uses return_value_policy::reference_internal by default
     template <typename Getter, typename... Extra>
-    class_ &def_property(const char *name, const Getter &fget, const cpp_function &fset, const Extra& ...extra) {
-        return def_property(name, cpp_function(fget), fset, return_value_policy::reference_internal, extra...);
+    class_ &def_property(const char *name, const Getter &fget, const cpp_function<> &fset, const Extra& ...extra) {
+        return def_property(name, cpp_function<>(fget), fset, return_value_policy::reference_internal, extra...);
     }
 
     /// Uses cpp_function's return_value_policy by default
     template <typename... Extra>
-    class_ &def_property(const char *name, const cpp_function &fget, const cpp_function &fset, const Extra& ...extra) {
+    class_ &def_property(const char *name, const cpp_function<> &fget, const cpp_function<> &fset, const Extra& ...extra) {
         return def_property_static(name, fget, fset, is_method(*this), extra...);
     }
 
-    /// Uses return_value_policy::reference by default
-    template <typename Getter, typename... Extra>
-    class_ &def_property_static(const char *name, const Getter &fget, const cpp_function &fset, const Extra& ...extra) {
-        return def_property_static(name, cpp_function(fget), fset, return_value_policy::reference, extra...);
+    /// Uses cpp_function's return_value_policy by default
+    template <typename ScopeGet, typename ScopeSet, typename... Extra>
+    class_ &def_property_scoped(const char *name, const cpp_function<ScopeGet> &fget, const cpp_function<ScopeSet> &fset, const Extra& ...extra) {
+        return def_property_static<ScopeGet, ScopeSet>(name, fget, fset, is_method(*this), extra...);
     }
 
-    /// Uses cpp_function's return_value_policy by default
     template <typename... Extra>
-    class_ &def_property_static(const char *name, const cpp_function &fget, const cpp_function &fset, const Extra& ...extra) {
+    class_ &def_property_release(const char *name, const cpp_function<int> &fget, const cpp_function<gil_scoped_release> &fset, const Extra& ...extra) {
+        return def_property_static<int, gil_scoped_release>(name, fget, fset, is_method(*this), extra...);
+    }
+
+    template <typename ScopeGet=int, typename ScopeSet=int, typename... Extra>
+    class_ &def_property_static(const char *name, const cpp_function<ScopeGet> &fget, const cpp_function<ScopeSet> &fset, const Extra& ...extra) {
         auto rec_fget = get_function_record(fget), rec_fset = get_function_record(fset);
         char *doc_prev = rec_fget->doc; /* 'extra' field may include a property-specific documentation string */
         detail::process_attributes<Extra...>::init(extra..., rec_fget);
@@ -1392,7 +1530,7 @@ inline void keep_alive_impl(handle nurse, handle patient) {
     if (patient.is_none() || nurse.is_none())
         return; /* Nothing to keep alive or nothing to be kept alive by */
 
-    cpp_function disable_lifesupport(
+    cpp_function<> disable_lifesupport(
         [patient](handle weakref) { patient.dec_ref(); weakref.dec_ref(); });
 
     weakref wr(nurse, disable_lifesupport);
@@ -1588,148 +1726,6 @@ void print(Args &&...args) {
     auto c = detail::collect_arguments<policy>(std::forward<Args>(args)...);
     detail::print(c.args(), c.kwargs());
 }
-
-#if defined(WITH_THREAD) && !defined(PYPY_VERSION)
-
-/* The functions below essentially reproduce the PyGILState_* API using a RAII
- * pattern, but there are a few important differences:
- *
- * 1. When acquiring the GIL from an non-main thread during the finalization
- *    phase, the GILState API blindly terminates the calling thread, which
- *    is often not what is wanted. This API does not do this.
- *
- * 2. The gil_scoped_release function can optionally cut the relationship
- *    of a PyThreadState and its associated thread, which allows moving it to
- *    another thread (this is a fairly rare/advanced use case).
- *
- * 3. The reference count of an acquired thread state can be controlled. This
- *    can be handy to prevent cases where callbacks issued from an external
- *    thread would otherwise constantly construct and destroy thread state data
- *    structures.
- *
- * See the Python bindings of NanoGUI (http://github.com/wjakob/nanogui) for an
- * example which uses features 2 and 3 to migrate the Python thread of
- * execution to another thread (to run the event loop on the original thread,
- * in this case).
- */
-
-class gil_scoped_acquire {
-public:
-    PYBIND11_NOINLINE gil_scoped_acquire() {
-        auto const &internals = detail::get_internals();
-        tstate = (PyThreadState *) PyThread_get_key_value(internals.tstate);
-
-        if (!tstate) {
-            tstate = PyThreadState_New(internals.istate);
-            #if !defined(NDEBUG)
-                if (!tstate)
-                    pybind11_fail("scoped_acquire: could not create thread state!");
-            #endif
-            tstate->gilstate_counter = 0;
-            #if PY_MAJOR_VERSION < 3
-                PyThread_delete_key_value(internals.tstate);
-            #endif
-            PyThread_set_key_value(internals.tstate, tstate);
-        } else {
-            release = detail::get_thread_state_unchecked() != tstate;
-        }
-
-        if (release) {
-            /* Work around an annoying assertion in PyThreadState_Swap */
-            #if defined(Py_DEBUG)
-                PyInterpreterState *interp = tstate->interp;
-                tstate->interp = nullptr;
-            #endif
-            PyEval_AcquireThread(tstate);
-            #if defined(Py_DEBUG)
-                tstate->interp = interp;
-            #endif
-        }
-
-        inc_ref();
-    }
-
-    void inc_ref() {
-        ++tstate->gilstate_counter;
-    }
-
-    PYBIND11_NOINLINE void dec_ref() {
-        --tstate->gilstate_counter;
-        #if !defined(NDEBUG)
-            if (detail::get_thread_state_unchecked() != tstate)
-                pybind11_fail("scoped_acquire::dec_ref(): thread state must be current!");
-            if (tstate->gilstate_counter < 0)
-                pybind11_fail("scoped_acquire::dec_ref(): reference count underflow!");
-        #endif
-        if (tstate->gilstate_counter == 0) {
-            #if !defined(NDEBUG)
-                if (!release)
-                    pybind11_fail("scoped_acquire::dec_ref(): internal error!");
-            #endif
-            PyThreadState_Clear(tstate);
-            PyThreadState_DeleteCurrent();
-            PyThread_delete_key_value(detail::get_internals().tstate);
-            release = false;
-        }
-    }
-
-    PYBIND11_NOINLINE ~gil_scoped_acquire() {
-        dec_ref();
-        if (release)
-           PyEval_SaveThread();
-    }
-private:
-    PyThreadState *tstate = nullptr;
-    bool release = true;
-};
-
-class gil_scoped_release {
-public:
-    explicit gil_scoped_release(bool disassoc = false) : disassoc(disassoc) {
-        tstate = PyEval_SaveThread();
-        if (disassoc) {
-            auto key = detail::get_internals().tstate;
-            #if PY_MAJOR_VERSION < 3
-                PyThread_delete_key_value(key);
-            #else
-                PyThread_set_key_value(key, nullptr);
-            #endif
-        }
-    }
-    ~gil_scoped_release() {
-        if (!tstate)
-            return;
-        PyEval_RestoreThread(tstate);
-        if (disassoc) {
-            auto key = detail::get_internals().tstate;
-            #if PY_MAJOR_VERSION < 3
-                PyThread_delete_key_value(key);
-            #endif
-            PyThread_set_key_value(key, tstate);
-        }
-    }
-private:
-    PyThreadState *tstate;
-    bool disassoc;
-};
-#elif defined(PYPY_VERSION)
-class gil_scoped_acquire {
-    PyGILState_STATE state;
-public:
-    gil_scoped_acquire() { state = PyGILState_Ensure(); }
-    ~gil_scoped_acquire() { PyGILState_Release(state); }
-};
-
-class gil_scoped_release {
-    PyThreadState *state;
-public:
-    gil_scoped_release() { state = PyEval_SaveThread(); }
-    ~gil_scoped_release() { PyEval_RestoreThread(state); }
-};
-#else
-class gil_scoped_acquire { };
-class gil_scoped_release { };
-#endif
 
 error_already_set::~error_already_set() {
     if (value) {

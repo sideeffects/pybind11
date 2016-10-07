@@ -1237,14 +1237,14 @@ public:
         return load_impl(args, kwargs, itypes{});
     }
 
-    template <typename Return, typename Func>
+    template <typename Return, typename Scope=int, typename Func>
     enable_if_t<!std::is_void<Return>::value, Return> call(Func &&f) {
-        return call_impl<Return>(std::forward<Func>(f), indices{});
+        return call_impl<Return, Scope>(std::forward<Func>(f), indices{});
     }
 
-    template <typename Return, typename Func>
+    template <typename Return, typename Scope=int, typename Func>
     enable_if_t<std::is_void<Return>::value, void_type> call(Func &&f) {
-        call_impl<Return>(std::forward<Func>(f), indices{});
+        call_impl<Return, Scope>(std::forward<Func>(f), indices{});
         return void_type();
     }
 
@@ -1274,8 +1274,10 @@ private:
         return true;
     }
 
-    template <typename Return, typename Func, size_t... Is>
+    template <typename Return, typename Scope, typename Func, size_t... Is>
     Return call_impl(Func &&f, index_sequence<Is...>) {
+	Scope s;
+	(void)s;
         return std::forward<Func>(f)(cast_op<Args>(std::get<Is>(value))...);
     }
 
