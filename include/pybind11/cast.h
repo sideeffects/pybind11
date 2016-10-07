@@ -692,6 +692,7 @@ public:
 protected:
     template <typename ReturnValue, typename Scope, typename Func, size_t ... Index> ReturnValue call(Func &&f, index_sequence<Index...>) {
 	Scope s;
+	(void)s;
         return f(std::get<Index>(value)
             .operator typename type_caster<typename intrinsic_type<Tuple>::type>::template cast_op_type<Tuple>()...);
     }
