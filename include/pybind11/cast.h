@@ -674,12 +674,12 @@ public:
                _(")"));
     }
 
-    template <typename ReturnValue, typename Func> typename std::enable_if<!std::is_void<ReturnValue>::value, ReturnValue>::type call(Func &&f) {
-        return call<ReturnValue>(std::forward<Func>(f), typename make_index_sequence<sizeof...(Tuple)>::type());
+    template <typename ReturnValue, typename Scope=int, typename Func> typename std::enable_if<!std::is_void<ReturnValue>::value, ReturnValue>::type call(Func &&f) {
+        return call<ReturnValue, Scope>(std::forward<Func>(f), typename make_index_sequence<sizeof...(Tuple)>::type());
     }
 
-    template <typename ReturnValue, typename Func> typename std::enable_if<std::is_void<ReturnValue>::value, void_type>::type call(Func &&f) {
-        call<ReturnValue>(std::forward<Func>(f), typename make_index_sequence<sizeof...(Tuple)>::type());
+    template <typename ReturnValue, typename Scope=int, typename Func> typename std::enable_if<std::is_void<ReturnValue>::value, void_type>::type call(Func &&f) {
+        call<ReturnValue, Scope>(std::forward<Func>(f), typename make_index_sequence<sizeof...(Tuple)>::type());
         return void_type();
     }
 
@@ -690,7 +690,8 @@ public:
     }
 
 protected:
-    template <typename ReturnValue, typename Func, size_t ... Index> ReturnValue call(Func &&f, index_sequence<Index...>) {
+    template <typename ReturnValue, typename Scope, typename Func, size_t ... Index> ReturnValue call(Func &&f, index_sequence<Index...>) {
+	Scope s;
         return f(std::get<Index>(value)
             .operator typename type_caster<typename intrinsic_type<Tuple>::type>::template cast_op_type<Tuple>()...);
     }
