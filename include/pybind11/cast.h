@@ -1067,6 +1067,13 @@ T cast(const handle &handle) {
     return cast_op<T>(load_type<T>(handle));
 }
 
+// pytype -> C++ type, potentially unsafe. Allows ref/ptr return.
+template <typename T, detail::enable_if_t<!detail::is_pyobject<T>::value, int> = 0>
+T cast_unsafe(const handle &handle) {
+    using namespace detail;
+    return cast_op<T>(load_type<T>(handle));
+}
+
 // pytype -> pytype (calls converting constructor)
 template <typename T, detail::enable_if_t<detail::is_pyobject<T>::value, int> = 0>
 T cast(const handle &handle) { return T(reinterpret_borrow<object>(handle)); }
