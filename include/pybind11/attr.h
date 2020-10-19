@@ -44,6 +44,9 @@ template <typename T> struct base {
 /// Keep patient alive while nurse lives
 template <size_t Nurse, size_t Patient> struct keep_alive { };
 
+/// Annotation indicating that a class can be a base class
+struct base_class { };
+
 /// Annotation indicating that a class is involved in a multiple inheritance relationship
 struct multiple_inheritance { };
 
@@ -200,8 +203,8 @@ struct function_record {
 /// Special data structure which (temporarily) holds metadata about a bound class
 struct type_record {
     PYBIND11_NOINLINE type_record()
-        : multiple_inheritance(false), dynamic_attr(false), buffer_protocol(false),
-          default_holder(true), module_local(false) { }
+        : base_class(false), multiple_inheritance(false), dynamic_attr(false),
+	  buffer_protocol(false), default_holder(true), module_local(false) { }
 
     /// Handle to the parent scope
     handle scope;
@@ -238,6 +241,9 @@ struct type_record {
 
     /// Custom metaclass (optional)
     handle metaclass;
+
+    /// Flag indicating if the class can be subclassed
+    bool base_class : 1;
 
     /// Multiple inheritance marker
     bool multiple_inheritance : 1;
@@ -403,6 +409,12 @@ struct process_attribute<T, enable_if_t<is_pyobject<T>::value>> : process_attrib
 template <typename T>
 struct process_attribute<base<T>> : process_attribute_default<base<T>> {
     static void init(const base<T> &, type_record *r) { r->add_base(typeid(T), nullptr); }
+};
+
+/// Process a base class attribute
+template <>
+struct process_attribute<base_class> : process_attribute_default<base_class> {
+    static void init(const base_class &, type_record *r) { r->base_class = true; }
 };
 
 /// Process a multiple inheritance attribute
