@@ -115,10 +115,6 @@
 #  endif
 #  pragma warning(push)
 #  pragma warning(disable: 4510 4610 4512 4005)
-#  if defined(_DEBUG) && !defined(Py_DEBUG)
-#    define PYBIND11_DEBUG_MARKER
-#    undef _DEBUG
-#  endif
 #endif
 
 #include <Python.h>
@@ -143,10 +139,6 @@
 #endif
 
 #if defined(_MSC_VER)
-#  if defined(PYBIND11_DEBUG_MARKER)
-#    define _DEBUG
-#    undef PYBIND11_DEBUG_MARKER
-#  endif
 #  pragma warning(pop)
 #endif
 
