@@ -224,8 +224,6 @@ PYBIND11_WARNING_DISABLE_MSVC(4505)
 #        if _MSVC_STL_VERSION >= 143
 #            include <crtdefs.h>
 #        endif
-#        define PYBIND11_DEBUG_MARKER
-#        undef _DEBUG
 #    endif
 #endif
 
@@ -293,10 +291,6 @@ PYBIND11_WARNING_DISABLE_MSVC(4505)
 #endif
 
 #if defined(_MSC_VER)
-#    if defined(PYBIND11_DEBUG_MARKER)
-#        define _DEBUG
-#        undef PYBIND11_DEBUG_MARKER
-#    endif
 PYBIND11_WARNING_POP
 #endif
 
